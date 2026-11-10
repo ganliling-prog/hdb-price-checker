@@ -65,7 +65,8 @@ export const HdbHousingApi = {
   },
 
   /**
-   * Fetches real live transactions directly from the official data.gov.sg datastore API
+   * Fetches real live transactions via the serverless /api/hdb-transactions endpoint,
+   * falling back directly to data.gov.sg if offline or in client-only mode
    */
   async fetchLiveFromDataGovSg(options?: {
     town?: string;
@@ -74,28 +75,42 @@ export const HdbHousingApi = {
   }): Promise<{ success: boolean; total?: number; count: number; error?: string }> {
     try {
       const limit = options?.limit || 50;
-      let url = `${DATA_GOV_SG_ENDPOINT}?resource_id=${DATA_GOV_SG_RESOURCE_ID}&limit=${limit}&sort=month%20desc`;
+      const params = new URLSearchParams();
+      params.set('limit', String(limit));
+      params.set('sort', 'month desc');
 
-      const filterObj: Record<string, string> = {};
       if (options?.town && options.town !== 'All') {
-        filterObj.town = options.town;
+        params.set('town', options.town);
       }
       if (options?.flat_type && options.flat_type !== 'All') {
-        filterObj.flat_type = options.flat_type;
+        params.set('flat_type', options.flat_type);
       }
 
-      if (Object.keys(filterObj).length > 0) {
-        url += `&filters=${encodeURIComponent(JSON.stringify(filterObj))}`;
-      }
-
-      const response = await fetch(url);
-      if (!response.ok) {
-        throw new Error(`data.gov.sg responded with status: ${response.status}`);
+      // Try local serverless endpoint first: /api/hdb-transactions
+      let response: globalThis.Response;
+      try {
+        response = await fetch(`/api/hdb-transactions?${params.toString()}`);
+        if (!response.ok) {
+          throw new Error(`Serverless endpoint returned HTTP ${response.status}`);
+        }
+      } catch (serverlessErr) {
+        // Fallback directly to public data.gov.sg endpoint
+        console.info('Serverless proxy unavailable, querying data.gov.sg directly...');
+        let directUrl = `${DATA_GOV_SG_ENDPOINT}?resource_id=${DATA_GOV_SG_RESOURCE_ID}&limit=${limit}&sort=month%20desc`;
+        const filterObj: Record<string, string> = {};
+        if (options?.town && options.town !== 'All') filterObj.town = options.town;
+        if (options?.flat_type && options.flat_type !== 'All') filterObj.flat_type = options.flat_type;
+        if (Object.keys(filterObj).length > 0) {
+          directUrl += `&filters=${encodeURIComponent(JSON.stringify(filterObj))}`;
+        }
+        response = await fetch(directUrl);
       }
 
       const json = await response.json();
-      if (json.success && json.result?.records) {
-        const liveRecords: HdbTransaction[] = json.result.records.map((r: any) =>
+      const recordsToFormat = json.records || json.result?.records;
+
+      if (recordsToFormat && Array.isArray(recordsToFormat)) {
+        const liveRecords: HdbTransaction[] = recordsToFormat.map((r: any) =>
           formatHdbTransaction(r)
         );
 
@@ -106,7 +121,7 @@ export const HdbHousingApi = {
 
         return {
           success: true,
-          total: json.result.total,
+          total: json.total || json.result?.total || liveRecords.length,
           count: liveRecords.length,
         };
       }
